@@ -1,6 +1,6 @@
 [package]
 name = "ai-report-factory"
-version = "0.2.0"
+version = "0.2.1"
 description = "AI Report Factory Windows desktop application"
 authors = ["AI Report Factory"]
 license = "MIT"

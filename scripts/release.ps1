@@ -16,8 +16,44 @@ function Step([string]$Text) {
   Write-Host "==> $Text" -ForegroundColor Cyan
 }
 
+function Test-TcpPort([string]$HostName, [int]$Port, [int]$TimeoutMs = 5000) {
+  $client = New-Object System.Net.Sockets.TcpClient
+  try {
+    $async = $client.BeginConnect($HostName, $Port, $null, $null)
+    if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+      return $false
+    }
+    $client.EndConnect($async)
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $client.Close()
+  }
+}
+
+function Invoke-Checked([string]$File, [string[]]$CommandArgs, [string]$ErrorMessage) {
+  $oldErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $File @CommandArgs 2>&1 | ForEach-Object { Write-Host $_ }
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldErrorActionPreference
+  }
+
+  if ($exitCode -ne 0) {
+    throw "$ErrorMessage ExitCode=$exitCode"
+  }
+}
+
 Push-Location $root
 try {
+  Step "Check GitHub connection"
+  if (-not (Test-TcpPort "github.com" 443 5000)) {
+    throw "Cannot connect to github.com:443. Check VPN/proxy/firewall first, then run this command again."
+  }
+
   Step "Sync version $tag"
   python scripts\bump_version.py $version
 
@@ -33,9 +69,10 @@ try {
   cargo check --manifest-path src-tauri\Cargo.toml
 
   Step "Commit release changes"
-  git fetch origin --tags
-  git rev-parse $tag 1>$null 2>$null
-  if ($LASTEXITCODE -eq 0) {
+  Invoke-Checked "git" @("fetch", "origin", "--tags") "git fetch failed."
+
+  $existingTag = git tag --list $tag
+  if ($existingTag) {
     throw "Version tag already exists: $tag. Please use a new version."
   }
 
@@ -45,12 +82,12 @@ try {
     throw "No staged changes. Stop release."
   }
 
-  git commit -m "chore: release $tag"
-  git tag $tag
+  Invoke-Checked "git" @("commit", "-m", "chore: release $tag") "git commit failed."
+  Invoke-Checked "git" @("tag", $tag) "git tag failed."
 
   Step "Push main and tag"
-  git push origin main
-  git push origin $tag
+  Invoke-Checked "git" @("push", "origin", "main") "git push main failed."
+  Invoke-Checked "git" @("push", "origin", $tag) "git push tag failed."
 
   Write-Host ""
   Write-Host "Release workflow has been triggered." -ForegroundColor Green
