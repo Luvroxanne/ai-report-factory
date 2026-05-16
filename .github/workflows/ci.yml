@@ -48,6 +48,13 @@ jobs:
         shell: pwsh
         run: npm.cmd --prefix frontend run type-check
 
+      - name: Prepare Tauri resource placeholder
+        shell: pwsh
+        run: |
+          if (-not (Test-Path backend/ai-report-backend.exe)) {
+            New-Item -ItemType File -Force backend/ai-report-backend.exe | Out-Null
+          }
+
       - name: Rust check
         shell: pwsh
         run: cargo check --manifest-path src-tauri/Cargo.toml

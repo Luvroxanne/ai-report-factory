@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "发版 Tag，例如 v0.2.1；必须与 tauri.conf.json version 一致"
+        description: "Release tag, for example v0.2.1. Must match tauri.conf.json version."
         required: true
         type: string
 
@@ -30,12 +30,12 @@ jobs:
         shell: pwsh
         run: |
           if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+([-.+][0-9A-Za-z.-]+)?$') {
-            throw "Tag 格式错误：$env:RELEASE_TAG，示例：v0.2.1"
+            throw "Invalid tag: $env:RELEASE_TAG. Example: v0.2.1"
           }
           $version = $env:RELEASE_TAG.TrimStart("v")
           $tauri = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           if ($tauri -ne $version) {
-            throw "版本不一致：tag=$env:RELEASE_TAG，但 tauri.conf.json version=$tauri。请先运行 scripts/release.ps1 或 scripts/bump_version.py。"
+            throw "Version mismatch: tag=$env:RELEASE_TAG, tauri.conf.json version=$tauri. Run scripts/release.ps1 first."
           }
 
       - name: Create tag for manual release
@@ -81,6 +81,9 @@ jobs:
         run: |
           python -m compileall backend/app
           npm.cmd --prefix frontend run type-check
+          if (-not (Test-Path backend/ai-report-backend.exe)) {
+            New-Item -ItemType File -Force backend/ai-report-backend.exe | Out-Null
+          }
           cargo check --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows installer
