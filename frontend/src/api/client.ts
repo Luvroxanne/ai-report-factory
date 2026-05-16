@@ -1,34 +1,71 @@
-export type TaskStatus =
-  | 'pending'
-  | 'parsing'
-  | 'generating_ppt'
-  | 'generating_script'
-  | 'generating_voice'
-  | 'generating_video'
-  | 'completed'
-  | 'failed'
+export type AiProvider = 'open_ai_compatible' | 'gemini' | 'ollama' | 'local'
+export type TtsProvider = 'none' | 'windows_sapi' | 'open_ai_compatible' | 'fish_speech'
+export type TaskStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 
-export interface TaskView {
-  id: string
-  original_filename: string
-  status: TaskStatus
-  current_step: string
-  progress: number
-  project_dir?: string | null
-  ppt_path?: string | null
-  script_path?: string | null
-  video_path?: string | null
-  json_path?: string | null
-  audio_dir?: string | null
-  subtitle_path?: string | null
-  log_path?: string | null
-  metadata_path?: string | null
-  error?: string | null
-  created_at: string
-  updated_at: string
+export interface AppConfig {
+  ai_provider: AiProvider
+  api_base_url: string
+  api_key: string
+  model_name: string
+  ollama_url: string
+  output_dir: string
+  enable_tts: boolean
+  enable_video: boolean
+  enable_local_fallback: boolean
+  enable_ffmpeg: boolean
+  ffmpeg_path: string
+  request_timeout_seconds: number
+  tts_provider: TtsProvider
+  tts_voice: string
+  tts_model: string
+  tts_base_url: string
+  tts_api_key: string
+  video_width: number
+  video_height: number
+  video_fps: number
 }
 
-export interface DependencyItem {
+export interface TaskRecord {
+  id: string
+  title: string
+  input_file?: string | null
+  input_text?: string | null
+  status: TaskStatus
+  progress: number
+  current_step: string
+  output_dir?: string | null
+  pptx_path?: string | null
+  docx_path?: string | null
+  script_path?: string | null
+  video_path?: string | null
+  audio_path?: string | null
+  subtitle_path?: string | null
+  json_path?: string | null
+  log_path?: string | null
+  created_at: string
+  updated_at: string
+  error_message?: string | null
+}
+
+export interface CreateTaskRequest {
+  title: string
+  input_file?: string | null
+  input_text: string
+  style?: string
+  template?: string
+  outputs?: string[]
+}
+
+export interface LocalFileItem {
+  name: string
+  path: string
+  file_type: string
+  size: number
+  created_at: string
+  previewable: boolean
+}
+
+export interface SystemStatusItem {
   name: string
   ok: boolean
   detail: string
@@ -40,128 +77,68 @@ export interface ProviderTestResult {
   message: string
 }
 
-function resolveApiBase(): string {
-  const configured = import.meta.env.VITE_API_BASE
-  if (configured) return String(configured).replace(/\/$/, '')
-
-  // Vite 开发模式下通过 dev server proxy 转发 /api；
-  // Tauri 正式包里页面也可能是 http(s)://tauri.localhost，此时不能用相对路径，
-  // 否则 /api 会命中前端静态资源服务并返回 index.html。
-  const isViteDevServer =
-    ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname) &&
-    window.location.port === '5173'
-  return isViteDevServer ? '' : 'http://127.0.0.1:8000'
+export interface VoiceOption {
+  id: string
+  label: string
+  provider: string
+  detail: string
 }
 
-const API_BASE = resolveApiBase()
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function isNetworkFetchError(error: unknown): boolean {
-  return error instanceof TypeError && /fetch|network|failed/i.test(error.message)
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  let response: Response | null = null
-  let lastError: unknown = null
-  const maxAttempts = API_BASE ? 40 : 3
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      response = await fetch(`${API_BASE}${url}`, init)
-      break
-    } catch (err) {
-      lastError = err
-      if (!isNetworkFetchError(err) || attempt >= maxAttempts) break
-      await sleep(750)
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: {
+      invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>
     }
   }
+}
 
-  if (!response) {
-    throw new Error(
-      `连接本地后端失败，请稍等或重启应用。` +
-        `如果是打包版，请确认本地后端已启动且未被防火墙拦截。` +
-        `${lastError instanceof Error ? ` 原始错误：${lastError.message}` : ''}`
-    )
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const api = window.__TAURI_INTERNALS__
+  if (!api?.invoke) {
+    throw new Error('当前页面未运行在 Tauri 桌面环境中')
   }
+  return api.invoke<T>(cmd, args)
+}
 
-  const contentType = response.headers.get('content-type') || ''
+export const api = {
+  getConfig: () => invoke<AppConfig>('get_app_config'),
+  saveConfig: (config: AppConfig) => invoke<AppConfig>('save_app_config', { config }),
+  resetConfig: () => invoke<AppConfig>('reset_app_config'),
+  listTtsVoices: () => invoke<VoiceOption[]>('list_tts_voices'),
+  testAi: (config?: AppConfig) => invoke<ProviderTestResult>('test_ai_connection', { config }),
+  createTask: (request: CreateTaskRequest) => invoke<TaskRecord>('create_task', { request }),
+  listTasks: (search?: string, status?: string) => invoke<TaskRecord[]>('list_tasks', { search, status }),
+  getTask: (id: string) => invoke<TaskRecord>('get_task', { id }),
+  deleteTask: (id: string) => invoke<void>('delete_task', { id }),
+  rerunTask: (id: string) => invoke<TaskRecord>('rerun_task', { id }),
+  scanFiles: () => invoke<LocalFileItem[]>('scan_output_files'),
+  previewFile: (path: string) => invoke<string>('preview_file', { path }),
+  openPath: (path: string) => invoke<void>('open_path', { path }),
+  openInFolder: (path: string) => invoke<void>('open_in_folder', { path }),
+  systemStatus: () => invoke<SystemStatusItem[]>('get_system_status')
+}
 
-  if (!response.ok) {
-    const payload = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {}
-    throw new Error(payload.detail || payload.message || `请求失败：${response.status}`)
+export function emptyConfig(): AppConfig {
+  return {
+    ai_provider: 'local',
+    api_base_url: 'https://api.openai.com/v1',
+    api_key: '',
+    model_name: 'gpt-4o-mini',
+    ollama_url: 'http://127.0.0.1:11434',
+    output_dir: '',
+    enable_tts: true,
+    enable_video: true,
+    enable_local_fallback: true,
+    enable_ffmpeg: true,
+    ffmpeg_path: '',
+    request_timeout_seconds: 60,
+    tts_provider: 'windows_sapi',
+    tts_voice: 'windows_default',
+    tts_model: 'tts-1',
+    tts_base_url: 'http://127.0.0.1:8080/v1',
+    tts_api_key: '',
+    video_width: 1920,
+    video_height: 1080,
+    video_fps: 24
   }
-
-  if (!contentType.includes('application/json')) {
-    const preview = await response.text().catch(() => '')
-    throw new Error(`后端返回了非 JSON 内容，请检查后端服务是否启动。响应开头：${preview.slice(0, 80)}`)
-  }
-
-  return response.json()
-}
-
-export async function waitForBackendReady(timeoutMs = 45000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  let lastError = ''
-  while (Date.now() < deadline) {
-    try {
-      await request('/api/health')
-      return
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err)
-      await sleep(900)
-    }
-  }
-  throw new Error(`本地后端启动超时：${lastError}`)
-}
-
-export async function createTask(file: File, style: string): Promise<{ task_id: string; status: TaskStatus }> {
-  const form = new FormData()
-  form.append('file', file)
-  form.append('style', style)
-  return request('/api/tasks', {
-    method: 'POST',
-    body: form
-  })
-}
-
-export async function listTasks(): Promise<TaskView[]> {
-  return request('/api/tasks')
-}
-
-export async function getTask(taskId: string): Promise<TaskView> {
-  return request(`/api/tasks/${taskId}`)
-}
-
-export async function getConfig(): Promise<Record<string, unknown>> {
-  const payload = await request<{ config: Record<string, unknown> }>('/api/config')
-  return payload.config
-}
-
-export async function saveConfig(config: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const payload = await request<{ config: Record<string, unknown> }>('/api/config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config })
-  })
-  return payload.config
-}
-
-export async function testProvider(provider: string, config: Record<string, unknown>): Promise<ProviderTestResult> {
-  return request('/api/config/test', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, config })
-  })
-}
-
-export async function getDependencies(): Promise<DependencyItem[]> {
-  const payload = await request<{ items: DependencyItem[] }>('/api/dependencies')
-  return payload.items
-}
-
-export function downloadUrl(taskId: string, kind: 'ppt' | 'script' | 'video' | 'json' | 'subtitle' | 'log' | 'metadata'): string {
-  return `${API_BASE}/api/tasks/${taskId}/download/${kind}`
 }

@@ -1,101 +1,348 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { createTask, downloadUrl, getConfig, getDependencies, getTask, listTasks, saveConfig, testProvider, waitForBackendReady, type DependencyItem, type TaskStatus, type TaskView } from './api/client'
+import { api, emptyConfig, type AppConfig, type LocalFileItem, type SystemStatusItem, type TaskRecord, type TaskStatus, type VoiceOption } from './api/client'
 
-type AppConfig = Record<string, any>
-type ArtifactKind = 'ppt' | 'script' | 'video' | 'json' | 'subtitle' | 'log' | 'metadata'
+type Page = 'dashboard' | 'generate' | 'history' | 'detail' | 'files' | 'settings' | 'environment' | 'about'
 
-const selectedFile = ref<File | null>(null)
-const selectedStyle = ref('official-tech')
-const loading = ref(false)
-const task = ref<TaskView | null>(null)
-const recentTasks = ref<TaskView[]>([])
-const error = ref('')
-const settingsOpen = ref(false)
-const configDraft = ref<AppConfig>(emptyConfig())
-const deps = ref<DependencyItem[]>([])
-const savingConfig = ref(false)
-const providerChecking = ref(false)
-const providerResult = ref('')
-let timer: number | null = null
+const page = ref<Page>('dashboard')
+const config = ref<AppConfig>(emptyConfig())
+const tasks = ref<TaskRecord[]>([])
+const files = ref<LocalFileItem[]>([])
+const systemItems = ref<SystemStatusItem[]>([])
+const voiceOptions = ref<VoiceOption[]>([])
+const selectedTask = ref<TaskRecord | null>(null)
+const preview = ref('')
+const message = ref('')
+const busy = ref(false)
+const search = ref('')
+const statusFilter = ref('')
+const form = ref({
+  title: 'AI Report Factory 本地优先改造报告',
+  inputFile: '',
+  inputText: '# 项目目标\n将桌面端重构为 Vue 3 + TypeScript + Tauri 2 + Rust 内置后端。\n\n## 核心要求\n- 本地生成 PPTX、DOCX、字幕和分镜 JSON\n- 可选生成语音旁白和 MP4 视频\n- 保存任务历史\n- GitHub Actions 自动发布 Windows 便携 exe',
+  style: 'agent-pro',
+  template: 'aurora-tech',
+  outputs: ['pptx', 'docx', 'script', 'subtitle', 'json']
+})
 
-const statusText: Record<TaskStatus, string> = {
-  pending: '等待中', parsing: '整理材料', generating_ppt: '生成PPT', generating_script: '生成解说稿', generating_voice: '生成语音', generating_video: '合成视频', completed: '已完成', failed: '失败'
+let pollTimer: number | null = null
+
+const recentTasks = computed(() => tasks.value.slice(0, 5))
+const providerLabel = computed(() => ({
+  open_ai_compatible: 'OpenAI 兼容',
+  gemini: 'Gemini',
+  ollama: 'Ollama',
+  local: '本地规则'
+}[config.value.ai_provider]))
+const selectedArtifacts = computed(() => selectedTask.value ? [
+  ['PPTX', selectedTask.value.pptx_path],
+  ['DOCX', selectedTask.value.docx_path],
+  ['讲稿', selectedTask.value.script_path],
+  ['语音', selectedTask.value.audio_path],
+  ['视频', selectedTask.value.video_path],
+  ['字幕', selectedTask.value.subtitle_path],
+  ['分镜 JSON', selectedTask.value.json_path],
+  ['日志', selectedTask.value.log_path]
+].filter(([, path]) => Boolean(path)) as Array<[string, string]> : [])
+
+function statusText(status: TaskStatus) {
+  return ({ pending: '等待中', running: '生成中', success: '成功', failed: '失败', cancelled: '已取消' } as Record<TaskStatus, string>)[status]
 }
-const statusLabel = computed(() => (task.value ? statusText[task.value.status] : '准备就绪'))
-const activeProvider = computed({ get: () => String(configDraft.value.ai?.active_provider || 'local'), set: (value: string) => { ensureConfigShape(configDraft.value); configDraft.value.ai.active_provider = value } })
-const activeProviderConfig = computed(() => providerConfig(activeProvider.value))
-const presentonConfig = computed(() => serviceConfig('presenton'))
-const cosyvoiceConfig = computed(() => serviceConfig('cosyvoice'))
-const wanConfig = computed(() => serviceConfig('wan'))
-const phaseSteps = [{ label: '材料解析', progress: 8 }, { label: 'PPT/大纲', progress: 42 }, { label: 'DOCX解说稿', progress: 56 }, { label: '语音片段', progress: 72 }, { label: '1080P视频', progress: 90 }, { label: '统一归档', progress: 100 }]
-const artifactCards = computed<Array<{ kind: ArtifactKind; tag: string; title: string; desc: string; available: boolean }>>(() => [
-  { kind: 'ppt', tag: 'PPTX', title: '商业PPT', desc: '封面、目录、章节、正文、总结页统一样式。', available: Boolean(task.value?.ppt_path) },
-  { kind: 'script', tag: 'DOCX', title: 'Word解说稿', desc: '按页输出讲解词、预计时长与备注。', available: Boolean(task.value?.script_path) },
-  { kind: 'video', tag: 'MP4', title: '1080P视频', desc: 'H.264编码，匹配音频节奏并带字幕。', available: Boolean(task.value?.video_path) },
-  { kind: 'json', tag: 'JSON', title: '中间结构', desc: '保留可二次编辑的报告结构。', available: Boolean(task.value?.json_path) },
-  { kind: 'subtitle', tag: 'SRT', title: '字幕文件', desc: '字幕内容来自每页解说稿。', available: Boolean(task.value?.subtitle_path) },
-  { kind: 'log', tag: 'LOG', title: '生成日志', desc: '关键步骤、兜底原因与路径记录。', available: Boolean(task.value?.log_path) },
-  { kind: 'metadata', tag: 'META', title: '元数据', desc: '产物路径、音频时长、脚本与任务信息。', available: Boolean(task.value?.metadata_path) }
-])
 
-function emptyConfig(): AppConfig { return { output_dir: 'outputs', ai: { active_provider: 'ollama', timeout_seconds: 90, retries: 2, providers: { openai: { base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini' }, gemini: { base_url: 'https://generativelanguage.googleapis.com', api_key: '', model: 'gemini-1.5-flash' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'qwen2.5:7b' }, local: { base_url: '', api_key: '', model: '' } } }, services: { presenton: { base_url: '', endpoint: '/api/v1/ppt/presentation/generate', username: '', password: '' }, cosyvoice: { base_url: '', endpoint: '/api/tts' }, wan: { base_url: '', mode: 'comfyui', workflow_template_path: '', poll_timeout_seconds: 600 } }, video: { width: 1920, height: 1080, fps: 24 }, desktop: { backend_url: 'http://127.0.0.1:8000' } } }
-function isPlainObject(value: unknown): value is AppConfig { return Boolean(value && typeof value === 'object' && !Array.isArray(value)) }
-function clonePlain<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T }
-function mergeMissing(target: AppConfig, source: AppConfig) { for (const [key, value] of Object.entries(source)) { if (target[key] === undefined || target[key] === null) target[key] = clonePlain(value); else if (isPlainObject(target[key]) && isPlainObject(value)) mergeMissing(target[key], value) } }
-function ensureConfigShape(config: AppConfig) { mergeMissing(config, emptyConfig()) }
-function providerConfig(name: string): AppConfig { ensureConfigShape(configDraft.value); const providers = configDraft.value.ai.providers; if (!providers[name]) providers[name] = { base_url: '', api_key: '', model: '' }; return providers[name] }
-function serviceConfig(name: string): AppConfig { ensureConfigShape(configDraft.value); const services = configDraft.value.services; if (!services[name]) services[name] = {}; return services[name] }
-function clearMaskedSecrets(value: unknown) { if (!isPlainObject(value)) return; for (const [key, item] of Object.entries(value)) { if (['api_key', 'token', 'password', 'secret'].includes(key.toLowerCase())) value[key] = ''; else clearMaskedSecrets(item) } }
-function stripBlankSecrets(value: unknown) { if (!isPlainObject(value)) return; for (const key of Object.keys(value)) { const item = value[key]; if (['api_key', 'token', 'password', 'secret'].includes(key.toLowerCase())) { if (!String(item || '').trim()) delete value[key] } else stripBlankSecrets(item) } }
-function configForSubmit(): AppConfig { const payload = clonePlain(configDraft.value); stripBlankSecrets(payload); return payload }
-function onFileChange(event: Event) { const input = event.target as HTMLInputElement; selectedFile.value = input.files?.[0] || null; error.value = '' }
-async function submit() { if (!selectedFile.value) { error.value = '请先上传 Markdown 或 TXT 材料'; return } loading.value = true; error.value = ''; try { const created = await createTask(selectedFile.value, selectedStyle.value); task.value = { id: created.task_id, original_filename: selectedFile.value.name, status: created.status, current_step: '等待中', progress: 0, created_at: '', updated_at: '' }; startPolling(created.task_id) } catch (err) { error.value = err instanceof Error ? err.message : '创建任务失败' } finally { loading.value = false } }
-function startPolling(taskId: string) { if (timer) window.clearInterval(timer); timer = window.setInterval(async () => { try { const latest = await getTask(taskId); task.value = latest; if (latest.status === 'completed' || latest.status === 'failed') { if (timer) window.clearInterval(timer); timer = null; recentTasks.value = await listTasks().catch(() => recentTasks.value) } } catch (err) { error.value = err instanceof Error ? err.message : '查询任务失败' } }, 1500) }
-async function loadSettings() { const config = await getConfig(); const draft = clonePlain(config) as AppConfig; ensureConfigShape(draft); clearMaskedSecrets(draft); configDraft.value = draft }
-async function persistSettings() { savingConfig.value = true; providerResult.value = ''; try { const saved = await saveConfig(configForSubmit()); const draft = clonePlain(saved) as AppConfig; ensureConfigShape(draft); clearMaskedSecrets(draft); configDraft.value = draft; providerResult.value = '配置已保存；Token 不会写入代码。' } catch (err) { providerResult.value = err instanceof Error ? err.message : '保存失败' } finally { savingConfig.value = false } }
-async function checkProvider() { providerChecking.value = true; providerResult.value = ''; try { const result = await testProvider(activeProvider.value, configForSubmit()); providerResult.value = `${result.ok ? '可用' : '不可用'}：${result.message}` } catch (err) { providerResult.value = err instanceof Error ? err.message : '检测失败' } finally { providerChecking.value = false } }
-async function refreshDependencies() { deps.value = await getDependencies().catch(() => []) }
-async function startTauriBackend() { const invoke = (window as any).__TAURI_INTERNALS__?.invoke; if (invoke) await invoke('start_backend') }
-onMounted(async () => { try { await startTauriBackend(); await waitForBackendReady() } catch (err) { error.value = err instanceof Error ? err.message : '本地后端启动失败' } await Promise.all([loadSettings().catch(() => undefined), refreshDependencies()]); recentTasks.value = await listTasks().catch(() => []) })
-onBeforeUnmount(() => { if (timer) window.clearInterval(timer) })
+function setPage(next: Page) {
+  page.value = next
+  message.value = ''
+  if (next === 'files') refreshFiles()
+  if (next === 'environment') refreshSystem()
+}
+
+async function boot() {
+  await Promise.all([loadConfig(), refreshTasks(), refreshSystem(), loadVoices()])
+  startPolling()
+}
+
+async function loadConfig() {
+  config.value = await api.getConfig()
+}
+
+async function loadVoices() {
+  voiceOptions.value = await api.listTtsVoices().catch(() => [])
+}
+
+async function saveConfig() {
+  busy.value = true
+  try {
+    config.value = await api.saveConfig(config.value)
+    message.value = '配置已保存到用户可写目录'
+  } catch (err) {
+    message.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function resetConfig() {
+  config.value = await api.resetConfig()
+  message.value = '已恢复默认配置'
+}
+
+async function testAi() {
+  busy.value = true
+  try {
+    const result = await api.testAi(config.value)
+    message.value = `${result.ok ? '连接可用' : '连接失败'}：${result.message}`
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onFileChange(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  form.value.inputFile = file.name
+  form.value.inputText = await file.text()
+}
+
+async function createTask() {
+  busy.value = true
+  message.value = ''
+  try {
+    const task = await api.createTask({
+      title: form.value.title,
+      input_file: form.value.inputFile,
+      input_text: form.value.inputText,
+      style: form.value.style,
+      template: form.value.template,
+      outputs: form.value.outputs
+    })
+    selectedTask.value = task
+    page.value = 'detail'
+    await refreshTasks()
+  } catch (err) {
+    message.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function refreshTasks() {
+  tasks.value = await api.listTasks(search.value || undefined, statusFilter.value || undefined)
+  if (selectedTask.value) {
+    selectedTask.value = tasks.value.find((item) => item.id === selectedTask.value?.id) || selectedTask.value
+  }
+}
+
+async function refreshFiles() {
+  files.value = await api.scanFiles()
+}
+
+async function refreshSystem() {
+  systemItems.value = await api.systemStatus()
+}
+
+async function openTask(task: TaskRecord) {
+  selectedTask.value = await api.getTask(task.id)
+  preview.value = ''
+  page.value = 'detail'
+}
+
+async function removeTask(task: TaskRecord) {
+  await api.deleteTask(task.id)
+  if (selectedTask.value?.id === task.id) selectedTask.value = null
+  await refreshTasks()
+}
+
+async function rerun(task: TaskRecord) {
+  selectedTask.value = await api.rerunTask(task.id)
+  page.value = 'detail'
+  await refreshTasks()
+}
+
+async function showPreview(path: string) {
+  preview.value = await api.previewFile(path)
+}
+
+async function copyPath(path: string) {
+  await navigator.clipboard?.writeText(path)
+  message.value = '路径已复制'
+}
+
+function startPolling() {
+  if (pollTimer) window.clearInterval(pollTimer)
+  pollTimer = window.setInterval(refreshTasks, 1500)
+}
+
+onMounted(() => {
+  boot().catch((err) => { message.value = err instanceof Error ? err.message : String(err) })
+})
+onBeforeUnmount(() => {
+  if (pollTimer) window.clearInterval(pollTimer)
+})
 </script>
 
 <template>
-  <main class="shell">
-    <section class="hero">
-      <div class="hero__copy">
-        <p class="eyebrow">WINDOWS DESKTOP · AI REPORT FACTORY</p>
-        <h1>把粗糙材料变成可交付的 PPT、解说稿和 1080P 成片</h1>
-        <p class="lead">保留 MVP 兜底链路，同时升级为可配置、可观测、可打包的桌面应用。Presenton、CosyVoice、Wan2.2 可用时优先调用，不可用时自动进入本地兜底。</p>
-        <div class="hero__actions"><button class="ghost-action" @click="settingsOpen = !settingsOpen">{{ settingsOpen ? '收起设置' : '打开能力配置' }}</button><span class="desktop-pill">Tauri + Rust 桌面壳</span></div>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">AR</span>
+        <div>
+          <strong>AI Report Factory</strong>
+          <small>Local-first Desktop</small>
+        </div>
       </div>
-      <div class="radar-card"><div class="radar-card__ring"></div><div class="radar-card__center"><strong>{{ task?.progress ?? 0 }}%</strong><span>{{ statusLabel }}</span></div></div>
-    </section>
-
-    <section v-if="settingsOpen" class="settings-panel">
-      <div class="panel__header"><span class="index">SET</span><div><h2>能力与 Token 配置</h2><p>Token 留空会保留已保存值；完全不配置也能用本地规则、Windows TTS 或静音兜底完整跑通。</p></div></div>
-      <div class="settings-grid">
-        <label><span>AI Provider</span><select v-model="activeProvider"><option value="openai">OpenAI兼容</option><option value="gemini">Gemini</option><option value="ollama">Ollama</option><option value="local">本地规则兜底</option></select></label>
-        <label><span>输出目录</span><input v-model="configDraft.output_dir" placeholder="outputs 或绝对路径" /></label>
-        <label v-if="activeProvider !== 'local'"><span>模型</span><input v-model="activeProviderConfig.model" placeholder="模型名称" /></label>
-        <label v-if="activeProvider !== 'local'"><span>Base URL</span><input v-model="activeProviderConfig.base_url" placeholder="服务地址" /></label>
-        <label v-if="activeProvider === 'openai' || activeProvider === 'gemini'"><span>API Token</span><input v-model="activeProviderConfig.api_key" type="password" placeholder="留空则保留已保存 Token" /></label>
-        <label><span>Presenton 地址</span><input v-model="presentonConfig.base_url" placeholder="http://127.0.0.1:3000" /></label>
-        <label><span>CosyVoice 地址</span><input v-model="cosyvoiceConfig.base_url" placeholder="http://127.0.0.1:9880" /></label>
-        <label><span>Wan2.2/ComfyUI 地址</span><input v-model="wanConfig.base_url" placeholder="http://127.0.0.1:8188" /></label>
-        <label><span>Wan2.2 工作流 JSON</span><input v-model="wanConfig.workflow_template_path" placeholder="可选：ComfyUI workflow 路径" /></label>
+      <nav>
+        <button :class="{ active: page === 'dashboard' }" @click="setPage('dashboard')">工作台</button>
+        <button :class="{ active: page === 'generate' }" @click="setPage('generate')">新建生成</button>
+        <button :class="{ active: page === 'history' }" @click="setPage('history')">历史记录</button>
+        <button :class="{ active: page === 'files' }" @click="setPage('files')">本地文件</button>
+        <button :class="{ active: page === 'settings' }" @click="setPage('settings')">配置中心</button>
+        <button :class="{ active: page === 'environment' }" @click="setPage('environment')">运行环境</button>
+        <button :class="{ active: page === 'about' }" @click="setPage('about')">关于</button>
+      </nav>
+      <div class="side-card">
+        <span>AI Provider</span>
+        <b>{{ providerLabel }}</b>
+        <small>{{ config.model_name || 'local-rule' }}</small>
       </div>
-      <div class="settings-actions"><button class="ghost-action" :disabled="providerChecking" @click="checkProvider">{{ providerChecking ? '检测中...' : '检测 Token/服务' }}</button><button class="primary-action compact" :disabled="savingConfig" @click="persistSettings">{{ savingConfig ? '保存中...' : '保存配置' }}</button><span v-if="providerResult" class="setting-result">{{ providerResult }}</span></div>
-      <div class="deps"><button class="mini-button" @click="refreshDependencies">刷新依赖</button><span v-for="item in deps" :key="item.name" :class="['dep', { ok: item.ok }]">{{ item.name }} · {{ item.ok ? '可用' : '缺失' }}</span></div>
-    </section>
+    </aside>
 
-    <section class="workspace">
-      <div class="panel uploader"><div class="panel__header"><span class="index">01</span><div><h2>上传汇报材料</h2><p>支持 Markdown / TXT。无 Token 时使用本地模板生成基础 PPT、DOCX 解说稿、音频、字幕与视频。</p></div></div><label class="dropzone"><input type="file" accept=".md,.txt" @change="onFileChange" /><span class="dropzone__icon">＋</span><strong>{{ selectedFile?.name || '选择一份材料文件' }}</strong><small>建议包含标题、章节、要点；系统会保留中间 JSON 便于二次编辑。</small></label><div class="style-grid"><label :class="{ active: selectedStyle === 'official-tech' }"><input v-model="selectedStyle" type="radio" value="official-tech" /><span>科技政企</span></label><label :class="{ active: selectedStyle === 'training' }"><input v-model="selectedStyle" type="radio" value="training" /><span>培训课程</span></label><label :class="{ active: selectedStyle === 'roadshow' }"><input v-model="selectedStyle" type="radio" value="roadshow" /><span>路演提案</span></label></div><button class="primary-action" :disabled="loading" @click="submit">{{ loading ? '创建任务中...' : '开始生成最终产物' }}</button><p v-if="error" class="error">{{ error }}</p></div>
-      <div class="panel flow"><div class="panel__header"><span class="index">02</span><div><h2>任务状态</h2><p>{{ task?.current_step || '等待新任务。所有关键步骤会写入日志，失败时自动进入可用兜底。' }}</p></div></div><ol class="steps"><li v-for="item in phaseSteps" :key="item.label" :class="{ done: (task?.progress ?? 0) >= item.progress }">{{ item.label }}</li></ol><div class="progress"><span :style="{ width: `${task?.progress ?? 0}%` }"></span></div><p class="current-step">{{ task?.id ? `任务ID：${task.id}` : '尚未创建任务' }}</p><p v-if="task?.error" class="error">{{ task.error }}</p></div>
-    </section>
+    <section class="content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Vue 3 + TypeScript + Tauri 2 + Rust</p>
+          <h1>本地优先的 AI 报告生成桌面工具</h1>
+        </div>
+        <button class="primary" @click="setPage('generate')">生成报告</button>
+      </header>
+      <p v-if="message" class="toast">{{ message }}</p>
 
-    <section class="result-grid"><article v-for="card in artifactCards" :key="card.kind" :class="['result-card', { ready: card.available }]"><span>{{ card.tag }}</span><h3>{{ card.title }}</h3><p>{{ card.desc }}</p><a v-if="task?.status === 'completed' && card.available" :href="downloadUrl(task.id, card.kind)">下载</a><small v-else>生成完成后可下载</small></article></section>
-    <section v-if="recentTasks.length" class="history panel"><div class="panel__header"><span class="index">HIS</span><div><h2>最近任务</h2><p>选择最近任务可继续查看进度或下载产物。</p></div></div><button v-for="item in recentTasks" :key="item.id" class="history-row" @click="task = item"><span>{{ item.original_filename }}</span><b>{{ statusText[item.status] }}</b><em>{{ item.updated_at }}</em></button></section>
+      <section v-if="page === 'dashboard'" class="page-grid">
+        <article class="hero-panel span-2">
+          <p class="eyebrow">No Python · No Server Required</p>
+          <h2>直接生成 PPTX、Word 解说稿、字幕、分镜 JSON 与可选 MP4</h2>
+          <p>Rust 内置后端负责配置、SQLite 历史、本地文件、AI Provider、TTS 旁白和 Office/OpenXML/ffmpeg 产物生成。</p>
+          <div class="quick-actions">
+            <button class="primary" @click="setPage('generate')">新建报告</button>
+            <button @click="setPage('settings')">配置 AI</button>
+            <button @click="setPage('files')">查看 outputs</button>
+          </div>
+        </article>
+        <article class="metric"><span>最近任务</span><b>{{ tasks.length }}</b><small>SQLite 本地保存</small></article>
+        <article class="metric"><span>输出目录</span><b>outputs</b><small>{{ config.output_dir }}</small></article>
+        <article v-for="cap in ['PPTX 本地生成', 'DOCX 解说稿', 'TXT/MD 讲稿', 'SRT 字幕', '分镜 JSON', '可选 TTS/MP4']" :key="cap" class="capability">{{ cap }}</article>
+        <article class="panel span-2">
+          <h3>最近任务</h3>
+          <button v-for="task in recentTasks" :key="task.id" class="task-row" @click="openTask(task)">
+            <span>{{ task.title }}</span><em :class="task.status">{{ statusText(task.status) }} · {{ task.progress }}%</em>
+          </button>
+        </article>
+      </section>
+
+      <section v-else-if="page === 'generate'" class="panel form-panel">
+        <h2>新建生成</h2>
+        <div class="form-grid">
+          <label>报告主题<input v-model="form.title" /></label>
+          <label>报告风格<select v-model="form.style"><option value="agent-pro">专业 Agent 增强</option><option value="official-tech">正式科技</option><option value="training">培训课件</option><option value="roadshow">路演汇报</option></select></label>
+          <label>PPT 模板<select v-model="form.template"><option value="aurora-tech">极光科技蓝</option><option value="ivory-business">商务白金</option><option value="emerald-training">翡翠培训</option><option value="sunset-roadshow">橙紫路演</option><option value="violet-creative">紫色创意</option></select></label>
+          <label class="span-2">上传 md/txt<input type="file" accept=".md,.txt" @change="onFileChange" /></label>
+          <label class="span-2">输入内容<textarea v-model="form.inputText" rows="12" /></label>
+        </div>
+        <div class="checks">
+          <label v-for="item in [['pptx','PPTX'],['docx','DOCX'],['script','TXT/MD 讲稿'],['subtitle','字幕'],['json','分镜 JSON'],['audio','语音旁白'],['video','1080P 视频']]" :key="item[0]">
+            <input v-model="form.outputs" type="checkbox" :value="item[0]" /> {{ item[1] }}
+          </label>
+        </div>
+        <p class="hint-card">完整安装包会内置 ffmpeg；勾选“1080P 视频”即可合成 MP4。音色仍在“配置中心”选择，默认使用 Windows 本地语音，不需要额外下载。</p>
+        <button class="primary" :disabled="busy" @click="createTask">{{ busy ? '提交中...' : '开始生成' }}</button>
+      </section>
+
+      <section v-else-if="page === 'history'" class="panel">
+        <div class="toolbar">
+          <input v-model="search" aria-label="搜索任务" @keyup.enter="refreshTasks" />
+          <select v-model="statusFilter" @change="refreshTasks"><option value="">全部状态</option><option value="pending">等待中</option><option value="running">生成中</option><option value="success">成功</option><option value="failed">失败</option></select>
+          <button @click="refreshTasks">刷新</button>
+        </div>
+        <button v-for="task in tasks" :key="task.id" class="task-row rich" @click="openTask(task)">
+          <span><b>{{ task.title }}</b><small>{{ task.created_at }}</small></span>
+          <em :class="task.status">{{ statusText(task.status) }} · {{ task.current_step }}</em>
+          <i>{{ task.output_dir }}</i>
+        </button>
+      </section>
+
+      <section v-else-if="page === 'detail'" class="panel">
+        <template v-if="selectedTask">
+          <div class="detail-head">
+            <div><h2>{{ selectedTask.title }}</h2><p>{{ selectedTask.current_step }} · {{ selectedTask.progress }}%</p></div>
+            <button v-if="selectedTask.output_dir" @click="api.openInFolder(selectedTask.output_dir)">打开目录</button>
+          </div>
+          <div class="progress"><span :style="{ width: `${selectedTask.progress}%` }" /></div>
+          <p v-if="selectedTask.error_message" class="error">{{ selectedTask.error_message }}</p>
+          <div class="artifact-grid">
+            <article v-for="[name, path] in selectedArtifacts" :key="path">
+              <b>{{ name }}</b><small>{{ path }}</small>
+              <div><button @click="api.openPath(path)">打开</button><button @click="api.openInFolder(path)">所在文件夹</button><button @click="copyPath(path)">复制路径</button><button v-if="/\\.(txt|md|json|log|srt|vtt)$/i.test(path)" @click="showPreview(path)">预览</button></div>
+            </article>
+          </div>
+          <div class="detail-actions"><button @click="rerun(selectedTask)">重新生成</button><button class="danger" @click="removeTask(selectedTask)">删除记录</button></div>
+          <pre v-if="preview" class="preview">{{ preview }}</pre>
+        </template>
+        <p v-else>请选择一个任务。</p>
+      </section>
+
+      <section v-else-if="page === 'files'" class="panel">
+        <div class="toolbar"><h2>本地文件</h2><button @click="refreshFiles">扫描 outputs</button></div>
+        <article v-for="file in files" :key="file.path" class="file-row">
+          <b>{{ file.name }}</b><span>{{ file.file_type }} · {{ (file.size / 1024).toFixed(1) }} KB</span><small>{{ file.path }}</small>
+          <div><button @click="api.openPath(file.path)">打开</button><button @click="api.openInFolder(file.path)">所在文件夹</button><button @click="copyPath(file.path)">复制路径</button><button v-if="file.previewable" @click="showPreview(file.path)">预览</button></div>
+        </article>
+        <pre v-if="preview" class="preview">{{ preview }}</pre>
+      </section>
+
+      <section v-else-if="page === 'settings'" class="panel form-panel">
+        <h2>配置中心</h2>
+        <div class="form-grid">
+          <label>AI Provider<select v-model="config.ai_provider"><option value="local">本地规则</option><option value="open_ai_compatible">OpenAI 兼容</option><option value="gemini">Gemini</option><option value="ollama">Ollama</option></select></label>
+          <label>模型名称<input v-model="config.model_name" /></label>
+          <label>API Base URL<input v-model="config.api_base_url" /></label>
+          <label>API Key<input v-model="config.api_key" type="password" aria-label="API Key 仅保存到用户目录" /></label>
+          <label>Ollama 地址<input v-model="config.ollama_url" /></label>
+          <label>输出目录<input v-model="config.output_dir" /></label>
+          <label>TTS Provider<select v-model="config.tts_provider"><option value="none">不生成语音</option><option value="windows_sapi">Windows SAPI 本地语音</option><option value="open_ai_compatible">OpenAI 兼容 TTS</option><option value="fish_speech">Fish Speech / 小智克隆音色</option></select></label>
+          <label>音色<select v-model="config.tts_voice"><option v-for="voice in voiceOptions" :key="voice.id" :value="voice.id">{{ voice.label }} · {{ voice.provider }}</option></select></label>
+          <label>TTS Base URL<input v-model="config.tts_base_url" /></label>
+          <label>TTS API Key<input v-model="config.tts_api_key" type="password" aria-label="TTS API Key 仅保存到用户目录" /></label>
+          <label>TTS 模型<input v-model="config.tts_model" /></label>
+          <label>ffmpeg 路径<input v-model="config.ffmpeg_path" aria-label="ffmpeg 路径，留空则自动查找内置 ffmpeg" /></label>
+          <label>视频宽度<input v-model.number="config.video_width" type="number" min="640" step="10" /></label>
+          <label>视频高度<input v-model.number="config.video_height" type="number" min="360" step="10" /></label>
+          <label>视频 FPS<input v-model.number="config.video_fps" type="number" min="12" max="60" /></label>
+        </div>
+        <div class="checks">
+          <label><input v-model="config.enable_local_fallback" type="checkbox" /> 启用本地规则兜底</label>
+          <label><input v-model="config.enable_tts" type="checkbox" /> 启用可选 TTS</label>
+          <label><input v-model="config.enable_video" type="checkbox" /> 启用可选视频</label>
+          <label><input v-model="config.enable_ffmpeg" type="checkbox" /> 启用可选 ffmpeg</label>
+        </div>
+        <p class="hint-card">视频合成条件：新建生成时勾选“1080P 视频”。完整安装包和 portable zip 会内置 tools/ffmpeg/ffmpeg.exe；ffmpeg 路径留空会自动查找内置文件。音色在这里选择，默认 Windows SAPI 本地语音不需要下载。</p>
+        <div class="quick-actions"><button class="primary" :disabled="busy" @click="saveConfig">保存配置</button><button @click="testAi">测试连接</button><button @click="resetConfig">恢复默认</button></div>
+      </section>
+
+      <section v-else-if="page === 'environment'" class="page-grid">
+        <article v-for="item in systemItems" :key="item.name" class="metric">
+          <span>{{ item.name }}</span><b :class="{ good: item.ok }">{{ item.ok ? '可用' : '可选/异常' }}</b><small>{{ item.detail }}</small>
+        </article>
+      </section>
+
+      <section v-else class="panel about">
+        <h2>关于 AI Report Factory</h2>
+        <p>AI Report Factory 是本地优先的 AI 报告生成桌面工具，技术栈为 Vue 3、TypeScript、Tauri 2 与 Rust 内置后端。</p>
+        <ul>
+          <li>GitHub：github.com/Luvroxanne/ai-report-factory</li>
+          <li>版本：v0.3.1</li>
+          <li>许可证：MIT</li>
+          <li>路线图：模板系统、更多 AI Provider、可选 TTS/ffmpeg 视频、自动更新。</li>
+        </ul>
+      </section>
+    </section>
   </main>
 </template>

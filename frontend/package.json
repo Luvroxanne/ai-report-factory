@@ -1,7 +1,7 @@
 {
   "name": "ai-report-factory-frontend",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,8 @@
     "type-check": "vue-tsc -b",
     "tauri": "cd .. && frontend\\node_modules\\.bin\\tauri",
     "desktop:dev": "cd .. && frontend\\node_modules\\.bin\\tauri dev",
-    "desktop:build": "cd .. && frontend\\node_modules\\.bin\\tauri build",
-    "backend:bundle": "powershell -ExecutionPolicy Bypass -File ..\\scripts\\bundle-backend.ps1"
+    "desktop:build": "cd .. && frontend\\node_modules\\.bin\\tauri build --no-bundle",
+    "desktop:installer": "cd .. && frontend\\node_modules\\.bin\\tauri build"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^5.2.0",
