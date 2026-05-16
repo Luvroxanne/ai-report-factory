@@ -102,6 +102,13 @@ jobs:
           name: ai-report-factory-windows-${{ env.RELEASE_TAG }}
           path: release-assets/*
 
+      - name: Ensure GitHub CLI
+        shell: pwsh
+        run: |
+          if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            choco install gh -y --no-progress
+          }
+
       - name: Publish GitHub Release
         shell: pwsh
         env:
