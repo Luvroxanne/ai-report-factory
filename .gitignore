@@ -9,11 +9,10 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
-outputs/*
-!outputs/.gitkeep
-logs/*
-!logs/.gitkeep
+outputs/
+logs/
 storage/
+config/
 .tmp-e2e-runtime/
 config/*.json
 release-assets/
@@ -25,11 +24,5 @@ resources/tools/ffmpeg/*.zip
 __pycache__/
 .venv/
 venv/
-legacy/**/__pycache__/
-legacy/**/*.pyc
-legacy/**/*.exe
-legacy/**/*.log
-legacy/**/build/
-legacy/**/storage/
 
 third_party/
