@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AI Report Factory",
+  "version": "0.2.0",
+  "identifier": "com.local.ai-report-factory",
+  "build": {
+    "beforeDevCommand": "cd ../frontend && npm.cmd run dev",
+    "beforeBuildCommand": "cd ../frontend && npm.cmd run build && npm.cmd run backend:bundle",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AI Report Factory",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 1120,
+        "minHeight": 760,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "shortDescription": "AI Report Factory",
+    "longDescription": "Desktop app for PPT, script, voice and 1080P video generation.",
+    "resources": [
+      "../config/**/*",
+      "../backend/ai-report-backend.exe"
+    ],
+    "externalBin": []
+  }
+}
